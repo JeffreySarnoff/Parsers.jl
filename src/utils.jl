@@ -84,11 +84,13 @@ function checksentinel(source::AbstractVector{UInt8}, pos, len, sentinel)
     sentinelpos = 0
     startptr = pointer(source, pos)
     # sentinel is an iterable of Tuple{Ptr{UInt8}, Int}, sorted from longest sentinel string to shortest
-    for (ptr, ptrlen) in sentinel
-        if pos + ptrlen - 1 <= len
-            match = memcmp(startptr, ptr, ptrlen)
+    for sent in sentinel
+        ptr = pointer(sent)
+        strlen = sizeof(sent)
+        if pos + strlen - 1 <= len
+            match = memcmp(startptr, ptr, strlen)
             if match
-                sentinelpos = pos + ptrlen
+                sentinelpos = pos + strlen
                 break
             end
         end
@@ -99,10 +101,12 @@ end
 function checksentinel(source::IO, pos, len, sentinel)
     sentinelpos = 0
     origpos = position(source)
-    for (ptr, ptrlen) in sentinel
-        matched = match!(source, ptr, ptrlen)
+    for sent in sentinel
+        ptr = pointer(sent)
+        strlen = sizeof(sent)
+        matched = match!(source, ptr, strlen)
         if matched
-            sentinelpos = pos + ptrlen
+            sentinelpos = pos + strlen
             break
         end
     end
@@ -110,33 +114,37 @@ function checksentinel(source::IO, pos, len, sentinel)
     return sentinelpos
 end
 
-function checkdelim(source::AbstractVector{UInt8}, pos, len, (ptr, ptrlen))
+function checkdelim(source::AbstractVector{UInt8}, pos, len, str)
+    ptr = pointer(str)
+    strlen = sizeof(str)
     startptr = pointer(source, pos)
     delimpos = pos
-    if pos + ptrlen - 1 <= len
-        match = memcmp(startptr, ptr, ptrlen)
+    if pos + strlen - 1 <= len
+        match = memcmp(startptr, ptr, strlen)
         if match
-            delimpos = pos + ptrlen
+            delimpos = pos + strlen
         end
     end
     return delimpos
 end
 
-function checkdelim(source::IO, pos, len, (ptr, ptrlen))
+function checkdelim(source::IO, pos, len, str)
+    ptr = pointer(str)
+    strlen = sizeof(str)
     delimpos = pos
-    matched = match!(source, ptr, ptrlen)
+    matched = match!(source, ptr, strlen)
     if matched
-        delimpos = pos + ptrlen
+        delimpos = pos + strlen
     end
     return delimpos
 end
 
-@inline function match!(source::IO, ptr, ptrlen)
+@inline function match!(source::IO, ptr, strlen)
     b = peekbyte(source)
     c = unsafe_load(ptr)
     if b != c
         return false
-    elseif ptrlen == 1
+    elseif strlen == 1
         incr!(source)
         return true
     end
@@ -153,7 +161,7 @@ end
         if b != c
             fastseek!(source, pos)
             return false
-        elseif i == ptrlen - 1
+        elseif i == strlen - 1
             break
         end
         i += 1
@@ -274,8 +282,6 @@ codes(r) = chop(chop(string(
     ifelse(r & (~INVALID & INVALID_DELIMITER) > 0, "INVALID_DELIMITER | ", ""),
     ifelse(r & (~INVALID & OVERFLOW) > 0, "OVERFLOW | ", "")
 )))
-
-ptrlen(s::String) = (pointer(s), sizeof(s))
 
 """
     PosLen(pos, len, ismissing, escaped)

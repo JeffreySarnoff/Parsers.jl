@@ -56,9 +56,10 @@ end
   * `debug=false`: if `true`, various debug logging statements will be printed while parsing; useful when diagnosing why parsing returns certain `Parsers.ReturnCode` values
 """
 struct Options
-    sentinel::Vector{String}
+    sentinel::Union{Nothing, Vector{String}}
     ignorerepeated::Bool
     ignoreemptylines::Bool
+    quoted::Bool
     oq::UInt8
     cq::UInt8
     e::UInt8
@@ -78,6 +79,8 @@ asciival(b::UInt8) = b < 0x80
 
 function Options(
             sentinel::Union{Nothing, Missing, Vector{String}},
+            wh1::Union{UInt8, Char},
+            wh2::Union{UInt8, Char},
             oq::Union{UInt8, Char},
             cq::Union{UInt8, Char},
             e::Union{UInt8, Char},
@@ -87,9 +90,12 @@ function Options(
             falses::Union{Nothing, Vector{String}},
             dateformat::Union{Nothing, String, Dates.DateFormat, Format},
             ignorerepeated, ignoreemptylines, comment, quoted, stripwhitespace=false, stripquoted=false)
-    asciival(wh1) && asciival(wh2) || throw(ArgumentError("whitespace characters must be ASCII"))
-    asciival(oq) && asciival(cq) && asciival(e) || throw(ArgumentError("openquotechar, closequotechar, and escapechar must be ASCII characters"))
-    (oq == delim) || (cq == delim) || (e == delim) && throw(ArgumentError("delim argument must be different than openquotechar, closequotechar, and escapechar arguments"))
+    if quoted
+        asciival(oq) && asciival(cq) && asciival(e) || throw(ArgumentError("openquotechar, closequotechar, and escapechar must be ASCII characters"))
+        if delim isa UInt8
+            (oq == delim) || (cq == delim) || (e == delim) && throw(ArgumentError("delim argument must be different than openquotechar, closequotechar, and escapechar arguments"))
+        end
+    end
     if sentinel isa Vector{String}
         for sent in sentinel
             if startswith(sent, string(Char(wh1))) || startswith(sent, string(Char(wh2)))
@@ -105,13 +111,13 @@ function Options(
             end
         end
     end
-    sent = sentinel === nothing || sentinel === missing ? sentinel : prepare(sentinel)
+    sent = sentinel === nothing ? sentinel : sentinel === missing ? String[] : prepare(sentinel)
     del = delim === nothing ? nothing : delim isa String ? delim : delim % UInt8
     if del isa UInt8
         ((wh1 % UInt8) == del || (wh2 % UInt8) == del) && throw(ArgumentError("whitespace characters (`wh1=' '` and `wh2='\\t'` default keyword arguments) must be different than delim argument"))
     end
     df = dateformat === nothing ? nothing : dateformat isa String ? Format(dateformat) : dateformat isa Dates.DateFormat ? Format(dateformat) : dateformat
-    return Options(refs, sent, ignorerepeated, ignoreemptylines, wh1 % UInt8, wh2 % UInt8, quoted, oq % UInt8, cq % UInt8, e % UInt8, del, decimal % UInt8, trues, falses, df, comment, stripwhitespace || stripquoted, stripquoted)
+    return Options(sent, ignorerepeated, ignoreemptylines, quoted, oq % UInt8, cq % UInt8, e % UInt8, del, decimal % UInt8, trues, falses, df, comment, stripwhitespace || stripquoted, stripquoted)
 end
 
 Options(;
@@ -186,7 +192,7 @@ A [`Parsers.Result`](@ref) struct is returned, with the following fields:
 function xparse end
 
 # for testing purposes only, it's much too slow to dynamically create Options for every xparse call
-function xparse(::Type{T}, buf::Union{AbstractVector{UInt8}, AbstractString, IO}; pos::Integer=1, len::Integer=buf isa IO ? 0 : sizeof(buf), sentinel=nothing, wh1::Union{UInt8, Char}=UInt8(' '), wh2::Union{UInt8, Char}=UInt8('\t'), quoted::Bool=true, openquotechar::Union{UInt8, Char}=UInt8('"'), closequotechar::Union{UInt8, Char}=UInt8('"'), escapechar::Union{UInt8, Char}=UInt8('"'), ignorerepeated::Bool=false, ignoreemptylines::Bool=false, delim::Union{UInt8, Char, PtrLen, AbstractString, Nothing}=UInt8(','), decimal::Union{UInt8, Char}=UInt8('.'), comment=nothing, trues=nothing, falses=nothing, dateformat::Union{Nothing, String, Dates.DateFormat}=nothing, debug::Bool=false, stripwhitespace::Bool=false, stripquoted::Bool=false) where {T}
+function xparse(::Type{T}, buf::Union{AbstractVector{UInt8}, AbstractString, IO}; pos::Integer=1, len::Integer=buf isa IO ? 0 : sizeof(buf), sentinel=nothing, wh1::Union{UInt8, Char}=UInt8(' '), wh2::Union{UInt8, Char}=UInt8('\t'), quoted::Bool=true, openquotechar::Union{UInt8, Char}=UInt8('"'), closequotechar::Union{UInt8, Char}=UInt8('"'), escapechar::Union{UInt8, Char}=UInt8('"'), ignorerepeated::Bool=false, ignoreemptylines::Bool=false, delim::Union{UInt8, Char, String, AbstractString, Nothing}=UInt8(','), decimal::Union{UInt8, Char}=UInt8('.'), comment=nothing, trues=nothing, falses=nothing, dateformat::Union{Nothing, String, Dates.DateFormat}=nothing, debug::Bool=false, stripwhitespace::Bool=false, stripquoted::Bool=false) where {T}
     options = Options(sentinel, wh1, wh2, openquotechar, closequotechar, escapechar, delim, decimal, trues, falses, dateformat, ignorerepeated, ignoreemptylines, comment, quoted, debug, stripwhitespace, stripquoted)
     return xparse(T, buf, pos, len, options)
 end
@@ -239,222 +245,12 @@ function xparse(::Type{Symbol}, source, pos, len, options, ::Type{S}=Symbol) whe
     end
 end
 
-function xparse(::Type{T}, source::Union{AbstractVector{UInt8}, IO}, pos, len, options::Options=XOPTIONS, ::Type{S}=T) where {T <: SupportedTypes, S}
-    startpos = vstartpos = pos
-    sentinel = options.sentinel
-    wh1 = options.wh1; wh2 = options.wh2
-    code = SUCCESS
-    quoted = false
-    sentinelpos = 0
-    if eof(source, pos, len)
-        code = (sentinel === missing ? SENTINEL : INVALID) | EOF
-        @goto donedone
-    end
-    b = peekbyte(source, pos)
-    # strip leading whitespace
-    while b == wh1 || b == wh2
-        pos += 1
-        incr!(source)
-        if eof(source, pos, len)
-            code = INVALID | EOF
-            @goto donedone
-        end
-        b = peekbyte(source, pos)
-    end
-    # check for start of quoted field
-    if options.quoted
-        quoted = b == options.oq
-        if quoted
-            code = QUOTED
-            pos += 1
-            vstartpos = pos
-            incr!(source)
-            if eof(source, pos, len)
-                code |= INVALID_QUOTED_FIELD
-                @goto donedone
-            end
-            b = peekbyte(source, pos)
-            # ignore whitespace within quoted field
-            while b == wh1 || b == wh2
-                pos += 1
-                incr!(source)
-                if eof(source, pos, len)
-                    code |= INVALID_QUOTED_FIELD | EOF
-                    @goto donedone
-                end
-                b = peekbyte(source, pos)
-            end
-        end
-    end
-    # check for sentinel values if applicable
-    if sentinel !== nothing && sentinel !== missing
-        sentinelpos = checksentinel(source, pos, len, sentinel)
-    end
-    x, code, pos = typeparser(T, source, pos, len, b, code, options)
-    if sentinel !== nothing && sentinel !== missing && sentinelpos >= pos
-        # if we matched a sentinel value that was as long or longer than our type value
-        code &= ~(OK | INVALID | OVERFLOW)
-        pos = sentinelpos
-        fastseek!(source, pos - 1)
-        code |= SENTINEL
-        if eof(source, pos, len)
-            code |= EOF
-        end
-    elseif sentinel === missing && pos == vstartpos
-        code &= ~(OK | INVALID)
-        code |= SENTINEL
-    end
-    if (code & EOF) == EOF
-        if quoted
-            # if we detected a quote character, it's an invalid quoted field due to eof in the middle
-            code |= INVALID_QUOTED_FIELD
-        end
-        @goto donedone
-    end
-
-@label donevalue
-    b = peekbyte(source, pos)
-    # donevalue means we finished parsing a value or sentinel, but didn't reach len, b is still the current byte
-    # strip trailing whitespace
-    while b == wh1 || b == wh2
-        pos += 1
-        incr!(source)
-        if eof(source, pos, len)
-            code |= EOF
-            if quoted
-                code |= INVALID_QUOTED_FIELD
-            end
-            @goto donedone
-        end
-        b = peekbyte(source, pos)
-    end
-    if options.quoted
-        # for quoted fields, find the closing quote character
-        # we should be positioned at the correct place to find the closing quote character if everything is as it should be
-        # if we don't find the quote character immediately, something's wrong, so mark INVALID
-        if quoted
-            same = options.cq == options.e
-            first = true
-            while true
-                pos += 1
-                incr!(source)
-                if same && b == options.e
-                    if eof(source, pos, len)
-                        code |= EOF
-                        if !first
-                            code |= INVALID
-                        end
-                        @goto donedone
-                    elseif peekbyte(source, pos) != options.cq
-                        if !first
-                            code |= INVALID
-                        end
-                        break
-                    end
-                    code |= ESCAPED_STRING
-                    pos += 1
-                    incr!(source)
-                elseif b == options.e
-                    if eof(source, pos, len)
-                        code |= INVALID_QUOTED_FIELD | EOF
-                        @goto donedone
-                    end
-                    code |= ESCAPED_STRING
-                    pos += 1
-                    incr!(source)
-                elseif b == options.cq
-                    if !first
-                        code |= INVALID
-                    end
-                    if eof(source, pos, len)
-                        code |= EOF
-                        @goto donedone
-                    end
-                    break
-                end
-                if eof(source, pos, len)
-                    code |= INVALID_QUOTED_FIELD | EOF
-                    @goto donedone
-                end
-                first = false
-                b = peekbyte(source, pos)
-            end
-            b = peekbyte(source, pos)
-            # ignore whitespace after quoted field
-            while b == wh1 || b == wh2
-                pos += 1
-                incr!(source)
-                if eof(source, pos, len)
-                    code |= EOF
-                    @goto donedone
-                end
-                b = peekbyte(source, pos)
-            end
-        end
-    end
-
-    if options.delim !== nothing
-        
-    end
-
-@label donedone
-    tlen = pos - startpos
-    if valueok(code)
-        y::T = x
-        return Result{S}(code, tlen, y)
-    else
-        return Result{S}(code, tlen)
-    end
-end
+xparse(::Type{T}, source::Union{AbstractVector{UInt8}, IO}, pos, len, options::Options=XOPTIONS, ::Type{S}=T) where {T <: SupportedTypes, S} =
+    Result(delimiter(emptysentinel(whitespace(quoted(whitespace(sentinel(typeparser)))))))(T, source, pos, len, opts, S)
 
 # condensed version of xparse that doesn't worry about quoting or delimiters; called from Parsers.parse/Parsers.tryparse
-@inline function xparse2(::Type{T}, source::Union{AbstractVector{UInt8}, IO}, pos, len, options::Options=XOPTIONS, ::Type{S}=T) where {T <: SupportedTypes, S}
-    startpos = pos
-    sentinel = options.sentinel
-    wh1 = options.wh1; wh2 = options.wh2
-    code = SUCCESS
-    quoted = false
-    if eof(source, pos, len)
-        code = (sentinel === missing ? SENTINEL : INVALID) | EOF
-        @goto donedone
-    end
-    b = peekbyte(source, pos)
-    # strip leading whitespace
-    while b == wh1 || b == wh2
-        pos += 1
-        incr!(source)
-        if eof(source, pos, len)
-            code = INVALID | EOF
-            @goto donedone
-        end
-        b = peekbyte(source, pos)
-    end
-    x, code, pos = typeparser(T, source, pos, len, b, code, options)
-    if (code & EOF) == EOF
-        @goto donedone
-    end
-
-@label donevalue
-    b = peekbyte(source, pos)
-    # donevalue means we finished parsing a value or sentinel, but didn't reach len, b is still the current byte
-    # strip trailing whitespace
-    while b == wh1 || b == wh2
-        pos += 1
-        incr!(source)
-        if eof(source, pos, len)
-            code |= EOF
-            if quoted
-                code |= INVALID_QUOTED_FIELD
-            end
-            @goto donedone
-        end
-        b = peekbyte(source, pos)
-    end
-
-@label donedone
-    tlen = pos - startpos
-    return valueok(code) ? Result{S}(code, tlen, x) : Result{S}(code, tlen)
-end
+@inline xparse2(::Type{T}, source::Union{AbstractVector{UInt8}, IO}, pos, len, options::Options=XOPTIONS, ::Type{S}=T) where {T <: SupportedTypes, S} =
+    Result(sentinel(typeparser))(T, source, pos, len, options, S)
 
 @inline function xparse2(::Type{T}, source, pos, len, options, ::Type{S}=T) where {T, S}
     res = xparse(String, source, pos, len, options)
@@ -524,7 +320,7 @@ function checkdelim!(buf, pos, len, options::Options)
                 @inbounds b = buf[pos]
             end
             matched && return pos
-        elseif delim isa PtrLen
+        elseif delim isa String
             matched = false
             predelimpos = pos
             pos = checkdelim(buf, pos, len, delim)

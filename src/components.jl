@@ -28,7 +28,7 @@ function emptysentinel(parser)
             return pos, code, pl, nothing
         end
         pos, code, pl, x = parser(T, source, pos, len, b, code, pl, opts)
-        if pos == pl.pos
+        if isempty(opts.sentinel) && pos == pl.pos
             code &= ~(OK | INVALID)
             code |= SENTINEL
             pl = withmissing(pl)
@@ -41,24 +41,26 @@ end
 function whitespace(parser)
     function(::Type{T}, source, pos, len, b, code, pl, opts) where {T}
         # strip leading whitespace
-        while b == UInt8(' ') || b == UInt8('\t')
-            pos += 1
-            incr!(source)
-            if (quoted(code) && opts.stripquoted) || opts.stripwhitespace
-                # we're in a quoted string and user has requested
-                # to strip whitespace inside, OR user has requested
-                # to strip whitespace outside of quoted strings
-                pl = poslen(pos, 0)
+        if opts.stripwhitespace
+            while b == UInt8(' ') || b == UInt8('\t')
+                pos += 1
+                incr!(source)
+                if (quoted(code) && opts.stripquoted) || opts.stripwhitespace
+                    # we're in a quoted string and user has requested
+                    # to strip whitespace inside, OR user has requested
+                    # to strip whitespace outside of quoted strings
+                    pl = poslen(pos, 0)
+                end
+                if eof(source, pos, len)
+                    code |= INVALID | EOF
+                    return pos, code, pl, nothing
+                end
+                b = peekbyte(source, pos)
             end
-            if eof(source, pos, len)
-                code |= INVALID | EOF
-                return pos, code, pl, nothing
-            end
-            b = peekbyte(source, pos)
         end
         pos, code, pl, x = parser(T, source, pos, len, b, code, pl, opts)
         # strip trailing whitespace
-        if !eof(code) && (!isgreedy(T) || (quoted(code) && escapedstring(code)))
+        if opts.stripwhitespace && !eof(code) && (!isgreedy(T) || (quoted(code) && escapedstring(code)))
             b = peekbyte(source, pos)
             while b == UInt8(' ') || b == UInt8('\t')
                 pos += 1
@@ -147,7 +149,7 @@ end
 
 function quoted(parser)
     function(::Type{T}, source, pos, len, b, code, pl, opts) where {T}
-        quoted = b == opts.oq
+        quoted = opts.quoted && b == opts.oq
         if quoted
             code |= QUOTED
             pos += 1
@@ -178,7 +180,7 @@ end
 
 function sentinel(parser)
     function(::Type{T}, source, pos, len, b, code, pl, opts) where {T}
-        sentinelpos = checksentinel(source, pos, len, opts.sentinel)
+        sentinelpos = opts.sentinel === nothing ? 0 : checksentinel(source, pos, len, opts.sentinel)
         pos, code, pl, x = parser(T, source, pos, len, b, code, pl, opts)
         if sentinelpos >= pos
             # if we matched a sentinel value that was as long or longer than our type value
@@ -338,7 +340,7 @@ end
 function delimiter(parser)
     function(::Type{T}, source, pos, len, b, code, pl, opts) where {T}
         pos, code, pl, x = parser(T, source, pos, len, b, code, pl, opts)
-        if delimited(code) || eof(code) # greedy case
+        if opts.delim === nothing || delimited(code) || eof(code) # greedy case
             return pos, code, pl, x
         end
         b = peekbyte(source, pos)
