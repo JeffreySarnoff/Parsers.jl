@@ -11,8 +11,6 @@ struct Format
     locale::Dates.DateLocale
 end
 
-const PtrLen = Tuple{Ptr{UInt8}, Int}
-
 const SupportedFloats = Union{Float16, Float32, Float64, BigFloat}
 const SupportedTypes = Union{Integer, SupportedFloats, Dates.TimeType, Bool}
 
@@ -58,34 +56,28 @@ end
   * `debug=false`: if `true`, various debug logging statements will be printed while parsing; useful when diagnosing why parsing returns certain `Parsers.ReturnCode` values
 """
 struct Options
-    refs::Vector{String} # for holding references to sentinel, trues, falses, cmt strings
-    sentinel::Union{Nothing, Missing, Vector{PtrLen}}
+    sentinel::Vector{String}
     ignorerepeated::Bool
     ignoreemptylines::Bool
-    wh1::UInt8
-    wh2::UInt8
-    quoted::Bool
     oq::UInt8
     cq::UInt8
     e::UInt8
-    delim::Union{Nothing, UInt8, PtrLen}
+    delim::Union{Nothing, UInt8, String}
     decimal::UInt8
-    trues::Union{Nothing, Vector{PtrLen}}
-    falses::Union{Nothing, Vector{PtrLen}}
+    trues::Union{Nothing, Vector{String}}
+    falses::Union{Nothing, Vector{String}}
     dateformat::Union{Nothing, Format}
-    cmt::Union{Nothing, PtrLen}
+    cmt::Union{Nothing, String}
     stripwhitespace::Bool
     stripquoted::Bool
 end
 
-prepare(x::Vector{String}) = sort!(map(ptrlen, x), by=x->x[2], rev=true)
+prepare(x::Vector{String}) = sort!(x, by=x->sizeof(x), rev=true)
 asciival(c::Char) = isascii(c)
 asciival(b::UInt8) = b < 0x80
 
 function Options(
             sentinel::Union{Nothing, Missing, Vector{String}},
-            wh1::Union{UInt8, Char},
-            wh2::Union{UInt8, Char},
             oq::Union{UInt8, Char},
             cq::Union{UInt8, Char},
             e::Union{UInt8, Char},
@@ -94,7 +86,7 @@ function Options(
             trues::Union{Nothing, Vector{String}},
             falses::Union{Nothing, Vector{String}},
             dateformat::Union{Nothing, String, Dates.DateFormat, Format},
-            ignorerepeated, ignoreemptylines, comment, quoted, debug, stripwhitespace=false, stripquoted=false)
+            ignorerepeated, ignoreemptylines, comment, quoted, stripwhitespace=false, stripquoted=false)
     asciival(wh1) && asciival(wh2) || throw(ArgumentError("whitespace characters must be ASCII"))
     asciival(oq) && asciival(cq) && asciival(e) || throw(ArgumentError("openquotechar, closequotechar, and escapechar must be ASCII characters"))
     (oq == delim) || (cq == delim) || (e == delim) && throw(ArgumentError("delim argument must be different than openquotechar, closequotechar, and escapechar arguments"))
@@ -112,31 +104,14 @@ function Options(
                 throw(ArgumentError("sentinel value isn't allowed to start with a delimiter string"))
             end
         end
-        refs = copy(sentinel)
-    else
-        refs = [""]
     end
     sent = sentinel === nothing || sentinel === missing ? sentinel : prepare(sentinel)
-    del = delim === nothing ? nothing : delim isa String ? ptrlen(delim) : delim % UInt8
+    del = delim === nothing ? nothing : delim isa String ? delim : delim % UInt8
     if del isa UInt8
         ((wh1 % UInt8) == del || (wh2 % UInt8) == del) && throw(ArgumentError("whitespace characters (`wh1=' '` and `wh2='\\t'` default keyword arguments) must be different than delim argument"))
     end
-    if trues !== nothing
-        append!(refs, trues)
-        trues = prepare(trues)
-    end
-    if falses !== nothing
-        append!(refs, falses)
-        falses = prepare(falses)
-    end
-    if comment === nothing
-        cmt = nothing
-    else
-        push!(refs, comment)
-        cmt = ptrlen(comment)
-    end
     df = dateformat === nothing ? nothing : dateformat isa String ? Format(dateformat) : dateformat isa Dates.DateFormat ? Format(dateformat) : dateformat
-    return Options(refs, sent, ignorerepeated, ignoreemptylines, wh1 % UInt8, wh2 % UInt8, quoted, oq % UInt8, cq % UInt8, e % UInt8, del, decimal % UInt8, trues, falses, df, cmt, stripwhitespace || stripquoted, stripquoted)
+    return Options(refs, sent, ignorerepeated, ignoreemptylines, wh1 % UInt8, wh2 % UInt8, quoted, oq % UInt8, cq % UInt8, e % UInt8, del, decimal % UInt8, trues, falses, df, comment, stripwhitespace || stripquoted, stripquoted)
 end
 
 Options(;
@@ -162,6 +137,8 @@ Options(;
 
 const OPTIONS = Options(nothing, UInt8(' '), UInt8('\t'), UInt8('"'), UInt8('"'), UInt8('"'), nothing, UInt8('.'), nothing, nothing, nothing, false, false, nothing, false, false, false)
 const XOPTIONS = Options(missing, UInt8(' '), UInt8('\t'), UInt8('"'), UInt8('"'), UInt8('"'), UInt8(','), UInt8('.'), nothing, nothing, nothing, false, false, nothing, true, false, false)
+
+include("components.jl")
 
 # high-level convenience functions like in Base
 """
@@ -417,249 +394,7 @@ function xparse(::Type{T}, source::Union{AbstractVector{UInt8}, IO}, pos, len, o
     end
 
     if options.delim !== nothing
-        delim = options.delim
-        # now we check for a delimiter; if we don't find it, keep parsing until we do
-        if !options.ignorerepeated
-            # we're checking for a single appearance of a delimiter
-            if delim isa UInt8
-                if b == delim
-                    pos += 1
-                    incr!(source)
-                    code |= DELIMITED
-                    @goto donedone
-                end
-            elseif delim isa PtrLen
-                predelimpos = pos
-                pos = checkdelim(source, pos, len, delim)
-                if pos > predelimpos
-                    # found the delimiter we were looking for
-                    code |= DELIMITED
-                    @goto donedone
-                end
-            else
-                error()
-            end
-        else
-            # keep parsing as long as we keep matching delims/newlines
-            if delim isa UInt8
-                matched = false
-                matchednewline = false
-                while true
-                    if b == delim
-                        matched = true
-                        code |= DELIMITED
-                        pos += 1
-                        incr!(source)
-                    elseif !matchednewline && b == UInt8('\n')
-                        matchednewline = matched = true
-                        pos += 1
-                        incr!(source)
-                        pos = checkcmtemptylines(source, pos, len, options)
-                        code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                    elseif !matchednewline && b == UInt8('\r')
-                        matchednewline = matched = true
-                        pos += 1
-                        incr!(source)
-                        if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                            pos += 1
-                            incr!(source)
-                        end
-                        pos = checkcmtemptylines(source, pos, len, options)
-                        code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                    else
-                        break
-                    end
-                    if eof(source, pos, len)
-                        @goto donedone
-                    end
-                    b = peekbyte(source, pos)
-                end
-                if matched
-                    @goto donedone
-                end
-            elseif delim isa PtrLen
-                matched = false
-                matchednewline = false
-                while true
-                    predelimpos = pos
-                    pos = checkdelim(source, pos, len, delim)
-                    if pos > predelimpos
-                        matched = true
-                        code |= DELIMITED
-                    elseif !matchednewline && b == UInt8('\n')
-                        matchednewline = matched = true
-                        pos += 1
-                        incr!(source)
-                        pos = checkcmtemptylines(source, pos, len, options)
-                        code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                    elseif !matchednewline && b == UInt8('\r')
-                        matchednewline = matched = true
-                        pos += 1
-                        incr!(source)
-                        if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                            pos += 1
-                            incr!(source)
-                        end
-                        pos = checkcmtemptylines(source, pos, len, options)
-                        code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                    else
-                        break
-                    end
-                    if eof(source, pos, len)
-                        @goto donedone
-                    end
-                    b = peekbyte(source, pos)
-                end
-                if matched
-                    @goto donedone
-                end
-            else
-                error()
-            end
-        end
-        # didn't find delimiter, but let's check for a newline character
-        if b == UInt8('\n')
-            pos += 1
-            incr!(source)
-            pos = checkcmtemptylines(source, pos, len, options)
-            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-            @goto donedone
-        elseif b == UInt8('\r')
-            pos += 1
-            incr!(source)
-            if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                pos += 1
-                incr!(source)
-            end
-            pos = checkcmtemptylines(source, pos, len, options)
-            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-            @goto donedone
-        end
-        # didn't find delimiter or newline, so we're invalid, keep parsing until we find delimiter, newline, or len
-        code |= INVALID_DELIMITER
-        while true
-            pos += 1
-            incr!(source)
-            if eof(source, pos, len)
-                code |= EOF
-                @goto donedone
-            end
-            b = peekbyte(source, pos)
-            if !options.ignorerepeated
-                if delim isa UInt8
-                    if b == delim
-                        pos += 1
-                        incr!(source)
-                        code |= DELIMITED
-                        @goto donedone
-                    end
-                elseif delim isa PtrLen
-                    predelimpos = pos
-                    pos = checkdelim(source, pos, len, delim)
-                    if pos > predelimpos
-                        # found the delimiter we were looking for
-                        code |= DELIMITED
-                        @goto donedone
-                    end
-                else
-                    error()
-                end
-            else
-                if delim isa UInt8
-                    matched = false
-                    matchednewline = false
-                    while true
-                        if b == delim
-                            matched = true
-                            code |= DELIMITED
-                            pos += 1
-                            incr!(source)
-                        elseif !matchednewline && b == UInt8('\n')
-                            matchednewline = matched = true
-                            pos += 1
-                            incr!(source)
-                            pos = checkcmtemptylines(source, pos, len, options)
-                            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                        elseif !matchednewline && b == UInt8('\r')
-                            matchednewline = matched = true
-                            pos += 1
-                            incr!(source)
-                            if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                                pos += 1
-                                incr!(source)
-                            end
-                            pos = checkcmtemptylines(source, pos, len, options)
-                            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                        else
-                            break
-                        end
-                        if eof(source, pos, len)
-                            @goto donedone
-                        end
-                        b = peekbyte(source, pos)
-                    end
-                    if matched
-                        @goto donedone
-                    end
-                elseif delim isa PtrLen
-                    matched = false
-                    matchednewline = false
-                    while true
-                        predelimpos = pos
-                        pos = checkdelim(source, pos, len, delim)
-                        if pos > predelimpos
-                            matched = true
-                            code |= DELIMITED
-                        elseif !matchednewline && b == UInt8('\n')
-                            matchednewline = matched = true
-                            pos += 1
-                            incr!(source)
-                            pos = checkcmtemptylines(source, pos, len, options)
-                            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                        elseif !matchednewline && b == UInt8('\r')
-                            matchednewline = matched = true
-                            pos += 1
-                            incr!(source)
-                            if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                                pos += 1
-                                incr!(source)
-                            end
-                            pos = checkcmtemptylines(source, pos, len, options)
-                            code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                        else
-                            break
-                        end
-                        if eof(source, pos, len)
-                            @goto donedone
-                        end
-                        b = peekbyte(source, pos)
-                    end
-                    if matched
-                        @goto donedone
-                    end
-                else
-                    error()
-                end
-            end
-            # didn't find delimiter, but let's check for a newline character
-            if b == UInt8('\n')
-                pos += 1
-                incr!(source)
-                pos = checkcmtemptylines(source, pos, len, options)
-                code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                @goto donedone
-            elseif b == UInt8('\r')
-                pos += 1
-                incr!(source)
-                if !eof(source, pos, len) && peekbyte(source, pos) == UInt8('\n')
-                    pos += 1
-                    incr!(source)
-                end
-                pos = checkcmtemptylines(source, pos, len, options)
-                code |= NEWLINE | ifelse(eof(source, pos, len), EOF, SUCCESS)
-                @goto donedone
-            end
-        end
+        
     end
 
 @label donedone
@@ -807,11 +542,10 @@ function checkdelim!(buf, pos, len, options::Options)
     return pos
 end
 
-function checkcmtemptylines(source, pos, len, options::Options)
-    cmt = options.cmt
+function checkcmtemptylines(source, pos, len, cmt, ignoreemptylines)
     while !eof(source, pos, len)
         skipped = false
-        if options.ignoreemptylines
+        if ignoreemptylines
             b = peekbyte(source, pos)
             if b == UInt8('\n')
                 pos += 1

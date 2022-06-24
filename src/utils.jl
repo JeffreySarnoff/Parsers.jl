@@ -310,6 +310,10 @@ const MAX_LEN = 1048575
     return Base.bitcast(PosLen, pos | Int64(len))
 end
 
+poslen(pos::Integer, len::Integer) = Base.bitcast(PosLen, (Int64(pos) << 20) | Int64(len))
+withmissing(pl::PosLen) = Base.or_int(pl, Base.bitcast(PosLen, MISSING_BIT))
+withescaped(pl::PosLen) = Base.or_int(pl, Base.bitcast(PosLen, ESCAPE_BIT))
+
 const MISSING_BIT = Base.bitcast(Int64, 0x8000000000000000)
 const ESCAPE_BIT = Base.bitcast(Int64, 0x4000000000000000)
 const POS_BITS = Base.bitcast(Int64, 0x3ffffffffff00000)
